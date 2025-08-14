@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CanalNav NL — Boat Map</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+
+<style>
+  :root { --panel-width: 360px; }
+  @media (max-width: 600px) { :root { --panel-width: 92vw; } }
+
+  html, body { height: 100%; margin: 0; }
+  #map { position: absolute; inset: 0; }
+
+  /* Panel */
+  .panel {
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
+    background: rgba(255,255,255,0.97); backdrop-filter: blur(6px);
+    border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.15);
+    padding: 12px; width: var(--panel-width);
+    max-height: calc(100dvh - 24px); overflow: auto;
+    font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    transition: transform .25s ease, opacity .25s ease, visibility .25s;
+  }
+  .panel.hidden { transform: translateX(-110%); opacity: 0; visibility: hidden; }
+  .panel h1{
+    display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 0 8px;
+    font-size: 16px;
+  }
+  .close-btn{ background:#111827; color:#fff; border:0; border-radius:8px; padding:6px 10px; font-weight:700; cursor:pointer; }
+  select { padding:6px 8px; border-radius:8px; border:1px solid #ddd; background:#fff; }
+
+  .grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:10px 0; }
+  .grid-3{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin:10px 0; }
+  .grid-4{ display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:10px; margin:10px 0; }
+  .grid label{ display:flex; align-items:center; gap:6px; }
+  .grid input[type="number"]{ width:100%; padding:8px 10px; border:1px solid #ddd; border-radius:8px; }
+  .grid input[type="checkbox"]{ transform:scale(1.05); }
+
+  .btns{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:10px 0 0 0; }
+  button{ padding:10px 12px; border:0; border-radius:10px; cursor:pointer; background:#0ea5e9; color:#fff; font-weight:700; }
+  button.secondary{ background:#111827; }
+  button.ghost{ background:#e5e7eb; color:#111827; }
+  button.warn{ background:#ef4444; }
+  button:disabled{ opacity:.5; cursor:not-allowed; }
+
+  .badge{ display:inline-block; background:#111827; color:#fff; border-radius:999px; padding:2px 8px; font-size:12px; }
+
+  /* Saved routes: more breathing room + no overlap */
+  .slot{ display:grid; grid-template-columns: 1fr auto auto auto; gap:12px; align-items:center; margin:10px 0; }
+  .slot input[type="text"]{ width:100%; min-height:40px; padding:8px 10px; border:1px solid #ddd; border-radius:8px; }
+  .slot button{ min-width:64px; }
+
+  .legend{ margin-top:8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:12px; color:#374151; }
+  .key{ display:flex; align-items:center; gap:6px; }
+  .swatch{ width:14px; height:14px; border-radius:3px; border:1px solid #0002; }
+  .swatch.blue{ background:#3b82f6; } .swatch.orange{ background:#fb923c; }
+  .swatch.green{ background:#10b981; } .swatch.red{ background:#ef4444; }
+  .swatch.yellow{ background:#f59e0b; } .swatch.violet{ background:#6366f1; }
+
+  .statusbar{
+    position:absolute; bottom:12px; left:12px; z-index:1000;
+    background:rgba(255,255,255,.95); padding:10px 12px; border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,.15);
+    display:flex; gap:10px; align-items:center; font:13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  .v-sep{ width:1px; height:18px; background:#0001; }
+  .boat-icon{ width:18px; height:18px; border-radius:50%; background:#111827; color:#fff; display:grid; place-items:center; font-size:12px; }
+  .attr{ position:absolute; right:12px; bottom:12px; background:rgba(255,255,255,.9); padding:6px 8px; border-radius:8px; font-size:12px; }
+
+  /* Toggle button — visible ONLY when panel is hidden */
+  #panelToggle{
+    position:absolute; top:12px; left:12px; z-index:1100;
+    border:0; border-radius:10px; padding:8px 10px; background:#111827; color:#fff; font-weight:700; cursor:pointer;
+    box-shadow:0 6px 24px rgba(0,0,0,.15); display:none;
+  }
+  body.panel-closed #panelToggle{ display:inline-block; }
+
+  /* panes to ensure visibility (fuel/dock always on top) */
+  .leaflet-fuel-pane, .leaflet-dock-pane { z-index: 750 !important; } /* above markers/overlays */
+  .leaflet-water-pane { z-index: 480 !important; }
+
+  /* Prominent pin base styles (SVG via divIcon) */
+  .pin { position:relative; transform: translate(-50%, -100%); }
+  .pin svg { filter: drop-shadow(0 6px 12px rgba(0,0,0,.35)); }
+  .pin .lbl {
+    position:absolute; top:-30px; left:50%; transform:translateX(-50%);
+    padding:2px 6px; border-radius:6px; font-weight:800; color:#1f2937; background:#fff;
+    border:1px solid #0001; white-space:nowrap;
+  }
+
+  .spinner{ width:14px; height:14px; border-radius:50%; border:2px solid #0ea5e980; border-top-color:transparent; display:inline-block; animation:spin .8s linear infinite; vertical-align:-2px; }
+  @keyframes spin{ to{ transform: rotate(360deg); } }
+</style>
+</head>
+<body class="panel-open">
+<button id="panelToggle" aria-label="Open menu">☰ Menu</button>
+<div id="map" aria-label="Canal map of the Netherlands"></div>
+
+<div class="panel" id="panel" role="region" aria-label="Controls">
+  <h1>
+    <span>🚤 CanalNav NL <span class="badge">beta</span></span>
+    <span style="display:flex; gap:8px; align-items:center;">
+      <select id="lang">
+        <option value="en" selected>English</option>
+        <option value="nl">Nederlands</option>
+      </select>
+      <button id="panelClose" class="close-btn" title="Close">× Close</button>
+    </span>
+  </h1>
+
+  <div class="grid">
+    <label>Length (m) <input id="boatLength" type="number" min="1" step="0.1" value="5"></label>
+    <label>Width (m)  <input id="boatWidth"  type="number" min="0.5" step="0.1" value="1.5"></label>
+  </div>
+
+  <div class="grid">
+    <label>Speed (km/h) <input id="boatSpeed" type="number" min="1" step="0.5" value="7"></label>
+    <label><input id="followMe" type="checkbox"> Follow me</label>
+  </div>
+
+  <div class="grid-4">
+    <label><input id="toggleWaterways" type="checkbox" checked> Waterways</label>
+    <label><input id="toggleLocks" type="checkbox" checked> Locks</label>
+    <label><input id="toggleBridges" type="checkbox" checked> Bridges</label>
+    <label><input id="toggleFuel" type="checkbox" checked> Fuel</label>
+  </div>
+  <div class="grid">
+    <label><input id="toggleDock" type="checkbox" checked> Docking/Mooring</label>
+    <label><input id="snapToWaterways" type="checkbox" checked> Snap clicks to canal</label>
+  </div>
+
+  <div class="grid">
+    <button id="locateBtn" class="secondary">📍 Locate me</button>
+  </div>
+
+  <div class="btns">
+    <button id="selectBtn" class="ghost">Select Start/Finish</button>
+    <button id="cancelSelBtn" class="warn" disabled>Cancel selection</button>
+    <button id="simulateBtn" disabled>▶︎ Simulate</button>
+    <button id="clearBtn" class="ghost">Clear route</button>
+  </div>
+
+  <h3 style="margin:14px 0 8px 0;font-size:14px;">Saved routes (max 3)</h3>
+  <div class="slot">
+    <input id="slotName1" type="text" placeholder="Route 1 name">
+    <button id="save1">Save</button><button id="load1" class="secondary">Load</button><button id="del1" class="warn">Del</button>
+  </div>
+  <div class="slot">
+    <input id="slotName2" type="text" placeholder="Route 2 name">
+    <button id="save2">Save</button><button id="load2" class="secondary">Load</button><button id="del2" class="warn">Del</button>
+  </div>
+  <div class="slot">
+    <input id="slotName3" type="text" placeholder="Route 3 name">
+    <button id="save3">Save</button><button id="load3" class="secondary">Load</button><button id="del3" class="warn">Del</button>
+  </div>
+
+  <div class="legend">
+    <span class="key"><span class="swatch blue"></span> Waterways</span>
+    <span class="key"><span class="swatch orange"></span> Locks</span>
+    <span class="key"><span class="swatch green"></span> Bridges</span>
+    <span class="key"><span class="swatch yellow"></span> Fuel</span>
+    <span class="key"><span class="swatch violet"></span> Docking/Mooring</span>
+    <span class="key"><span class="swatch red"></span> Constraint &lt; boat width</span>
+  </div>
+  <p style="font-size:12px;color:#555;margin-top:6px">Zoom to ≥ 12 to fetch canals/POIs. Click “Select Start/Finish” to compute a route along waterways.</p>
+  <p style="font-size:12px;color:#555;">Data: OpenStreetMap via Overpass. Verify local regulations & notices to mariners.</p>
+</div>
+
+<div class="statusbar">
+  <span class="boat-icon">⛵</span>
+  <span id="statusText">Ready.</span>
+  <span class="v-sep"></span>
+  <span id="routeStats">Route: —</span>
+  <span id="busy" style="display:none"><span class="spinner"></span></span>
+</div>
+
+<div class="attr">© OpenStreetMap contributors • Tiles © OSM</div>
+
+<script defer src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script defer>
+/* ========= Boot ========= */
+(function boot(){ const go=()=>{ if(!window.L) return setTimeout(go,40); initApp(); }; go(); })();
+
+/* ======================= App ======================= */
+function initApp() {
+  const statusText = document.getElementById('statusText');
+  const routeStats = document.getElementById('routeStats');
+  const busy = document.getElementById('busy');
+  const setBusy = (on)=> busy.style.display = on ? 'inline-block' : 'none';
+  const setStatus = (m)=> statusText.textContent = m;
+
+  /* Panel show/hide */
+  const panel = document.getElementById('panel');
+  const panelToggle = document.getElementById('panelToggle');
+  const panelClose  = document.getElementById('panelClose');
+  function openPanel(){ panel.classList.remove('hidden'); document.body.classList.remove('panel-closed'); document.body.classList.add('panel-open'); }
+  function closePanel(){ panel.classList.add('hidden'); document.body.classList.add('panel-closed'); document.body.classList.remove('panel-open'); }
+  if (matchMedia('(max-width: 600px)').matches) closePanel(); else openPanel();
+  panelToggle.addEventListener('click', openPanel);
+  panelClose.addEventListener('click', closePanel);
+  window.addEventListener('keydown', (e)=>{ if(e.key.toLowerCase()==='m'){ if(panel.classList.contains('hidden')) openPanel(); else closePanel(); } });
+
+  // Map
+  const map = L.map('map', { zoomControl: true }).setView([52.1, 5.3], 8);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+  L.control.scale({ metric: true, imperial: false }).addTo(map);
+
+  // Custom panes for strong visibility
+  map.createPane('waterPane');   map.getPane('waterPane').classList.add('leaflet-water-pane');
+  map.createPane('fuelPane');    map.getPane('fuelPane').classList.add('leaflet-fuel-pane');
+  map.createPane('dockPane');    map.getPane('dockPane').classList.add('leaflet-dock-pane');
+
+  // Layers
+  const waterwaysLayer = L.geoJSON(null, { pane:'waterPane', style: () => ({ color:'#3b82f6', weight: 2, opacity: 0.9 }) }).addTo(map);
+  const locksLayer = L.layerGroup().addTo(map);
+  const bridgesLayer = L.layerGroup().addTo(map);
+  const fuelLayer = L.layerGroup({ pane:'fuelPane' }).addTo(map);
+  const dockingLayer = L.layerGroup({ pane:'dockPane' }).addTo(map);
+  const routeLayer = L.layerGroup().addTo(map);
+  const selectionLayer = L.layerGroup().addTo(map);
+
+  // State
+  const state = {
+    boat: { length: 5, width: 1.5, speedKmh: 7 },
+    follow: false, meMarker: null, geowatchId: null,
+    fetchedTileKeys: new Set(), graph: { nextId: 1, nodes: new Map(), coords: new Map(), adj: new Map(), segments: [] },
+    route: null, sim: { anim: null, marker: null }, selection: { active:false, start:null, finish:null, startM:null, finishM:null },
+    cacheMem: new Map()
+  };
+
+  /* ---------- UI ---------- */
+  const $ = s => document.querySelector(s);
+  const boatLength = $('#boatLength'), boatWidth = $('#boatWidth'), boatSpeed = $('#boatSpeed');
+  const followMe = $('#followMe'), locateBtn = $('#locateBtn'), clearBtn = $('#clearBtn'), simulateBtn = $('#simulateBtn');
+  const selectBtn = $('#selectBtn'), cancelSelBtn = $('#cancelSelBtn');
+  const toggleWaterways = $('#toggleWaterways'), toggleLocks = $('#toggleLocks'), toggleBridges = $('#toggleBridges');
+  const toggleFuel = $('#toggleFuel'), toggleDock = $('#toggleDock'), snapToWaterways = $('#snapToWaterways');
+
+  // Slots
+  const slots = [
+    { nameInput: $('#slotName1'), save: $('#save1'), load: $('#load1'), del: $('#del1'), key: 'routeSlot1' },
+    { nameInput: $('#slotName2'), save: $('#save2'), load: $('#load2'), del: $('#del2'), key: 'routeSlot2' },
+    { nameInput: $('#slotName3'), save: $('#save3'), load: $('#load3'), del: $('#del3'), key: 'routeSlot3' }
+  ];
+  slots.forEach(s => { const raw = localStorage.getItem(s.key); if (raw) { try { const o = JSON.parse(raw); if (o?.name) s.nameInput.value = o.name; } catch {} } });
+
+  boatLength.addEventListener('input', ()=>{ state.boat.length = +boatLength.value; restylePOIs(); });
+  boatWidth .addEventListener('input', ()=>{ state.boat.width  = +boatWidth.value;  restylePOIs(); });
+  boatSpeed .addEventListener('input', ()=>{ state.boat.speedKmh = +boatSpeed.value; updateRouteStats(); });
+  followMe  .addEventListener('change', ()=> state.follow = followMe.checked);
+
+  locateBtn.addEventListener('click', startLocate);
+  clearBtn.addEventListener('click', clearRoute);
+  simulateBtn.addEventListener('click', toggleSimulation);
+  selectBtn.addEventListener('click', startSelect);
+  cancelSelBtn.addEventListener('click', cancelSelect);
+
+  [ [toggleWaterways, waterwaysLayer], [toggleLocks, locksLayer], [toggleBridges, bridgesLayer],
+    [toggleFuel, fuelLayer], [toggleDock, dockingLayer] ]
+  .forEach(([ctrl, layer]) => ctrl.addEventListener('change', ()=> ctrl.checked ? layer.addTo(map) : map.removeLayer(layer)));
+
+  map.on('click', onMapClick);
+
+  /* ---------- Geo ---------- */
+  function startLocate(){
+    if (!('geolocation' in navigator)) { setStatus('Geolocation not supported.'); return; }
+    if (state.geowatchId !== null) { navigator.geolocation.clearWatch(state.geowatchId); }
+    state.geowatchId = navigator.geolocation.watchPosition(
+      pos=>{
+        const ll=[pos.coords.latitude, pos.coords.longitude];
+        if(!state.meMarker) state.meMarker=L.marker(ll,{title:'You',zIndexOffset:1000}).addTo(map);
+        else state.meMarker.setLatLng(ll);
+        if(state.follow) map.setView(ll, Math.max(map.getZoom(), 14));
+      },
+      err=> setStatus('Geolocation error: '+err.message),
+      { enableHighAccuracy:true, maximumAge:5000, timeout:15000 }
+    );
+  }
+
+  /* ---------- Overpass + caching ---------- */
+  const OVERPASS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://lz4.overpass-api.de/api/interpreter',
+    'https://z.overpass-api.de/api/interpreter'
+  ];
+  const TTL_MS = 24*3600*1000;
+  function tileKeyFromBounds(b){ const step=0.05; const s=Math.floor(b.getSouth()/step)*step, w=Math.floor(b.getWest()/step)*step, n=Math.ceil(b.getNorth()/step)*step, e=Math.ceil(b.getEast()/step)*step; return [s,w,n,e].join(','); }
+  const bboxString = b => `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
+  const qWaterways = b => `[\nout:json][timeout:30];\n  way["waterway"~"^(canal|river|stream|drain|ditch)$"](${bboxString(b)});\n  out tags geom;`;
+  const qLocksBridges = b => `[\nout:json][timeout:30];(\n  node["waterway"="lock_gate"](${bboxString(b)});\n  way ["waterway"="lock_gate"](${bboxString(b)});\n  node["lock"="yes"](${bboxString(b)});\n  way ["lock"="yes"](${bboxString(b)});\n  way ["bridge"](${bboxString(b)});\n); out tags center;`;
+  /* Expanded docking coverage + boat fuel */
+  const qFuelDock = b => `[\nout:json][timeout:30];(\n  node["amenity"="fuel"]["boat"~"yes|true|designated|*"](${bboxString(b)});\n  way ["amenity"="fuel"]["boat"~"yes|true|designated|*"](${bboxString(b)});\n  node["seamark:type"="fuel_supply"](${bboxString(b)});\n  node["leisure"="marina"](${bboxString(b)});\n  way  ["leisure"="marina"](${bboxString(b)});\n  node["mooring"](${bboxString(b)});\n  way  ["mooring"](${bboxString(b)});\n  node["amenity"="harbour"](${bboxString(b)});\n  way  ["amenity"="harbour"](${bboxString(b)});\n  node["seamark:type"~"^(harbour|mooring|small_craft_facility)$"](${bboxString(b)});\n);\nout tags center;`;
+
+  function cacheGet(ns,key){ const k=`canalnav:${ns}:${key}`; if(state.cacheMem.has(k)) return state.cacheMem.get(k); const raw=localStorage.getItem(k); if(!raw) return null; try{const o=JSON.parse(raw); if(Date.now()-o.t>TTL_MS){localStorage.removeItem(k);return null;} state.cacheMem.set(k,o.v); return o.v;}catch{return null;} }
+  function cacheSet(ns,key,val){ const k=`canalnav:${ns}:${key}`; const o={t:Date.now(),v:val}; state.cacheMem.set(k,val); try{localStorage.setItem(k,JSON.stringify(o));}catch{} }
+  async function fetchOverpass(query, nsKey){
+    const cached = cacheGet('overpass', nsKey); if(cached) return cached;
+    for(const url of OVERPASS){ try{ const res=await fetch(url,{method:'POST', body:query, headers:{'Content-Type':'text/plain;charset=UTF-8'}}); if(!res.ok) throw new Error(await res.text()); const j=await res.json(); cacheSet('overpass', nsKey, j); return j; }catch(e){} }
+    throw new Error('All Overpass endpoints failed.');
+  }
+
+  /* ---------- Geometry helpers ---------- */
+  const R = 6371000, toRad = d=>d*Math.PI/180;
+  function haversine(a,b){ const [lat1,lon1]=a,[lat2,lon2]=b; const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1); const s=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.sqrt(s)); }
+  function thin(coordsLonLat){ if(coordsLonLat.length<=2) return coordsLonLat; const out=[coordsLonLat[0]]; let last=[coordsLonLat[0][1], coordsLonLat[0][0]]; for(let i=1;i<coordsLonLat.length-1;i++){ const cur=[coordsLonLat[i][1], coordsLonLat[i][0]]; if(haversine(last,cur)>=15){ out.push(coordsLonLat[i]); last=cur; } } out.push(coordsLonLat.at(-1)); return out; }
+
+  /* ---------- Renderers ---------- */
+  function renderWaterways(data){
+    const features=[];
+    for(const el of (data.elements||[])){
+      if(el.type==='way' && el.geometry){
+        const coords = thin(el.geometry.map(g=>[g.lon,g.lat]));
+        features.push({ type:'Feature', geometry:{ type:'LineString', coordinates:coords }, properties: el.tags||{} });
+      }
+    }
+    waterwaysLayer.addData({ type:'FeatureCollection', features });
+    buildGraphFromFeatures(features);
+  }
+
+  function renderLocksBridges(data){
+    locksLayer.clearLayers(); bridgesLayer.clearLayers();
+    const boatW = state.boat.width;
+    for(const el of (data.elements||[])){
+      let lat,lon,tags=el.tags||{};
+      if(el.type==='node'){ lat=el.lat; lon=el.lon; }
+      else if(el.type==='way' && el.center){ lat=el.center.lat; lon=el.center.lon; } else continue;
+
+      let kind = (tags.waterway==='lock_gate' || tags.lock==='yes') ? 'lock' : 'bridge';
+      const wTags=['maxwidth','boat:width','maxbeam']; let limitWidth=null;
+      for(const k of wTags){ if(tags[k]){ const v=parseFloat(String(tags[k]).replace(/[^0-9.]/g,'')); if(!isNaN(v)){ limitWidth=v; break; } } }
+      const constrained = (limitWidth!==null) && boatW>limitWidth;
+      const color = kind==='lock' ? (constrained?'#ef4444':'#fb923c') : (constrained?'#ef4444':'#10b981');
+      const m=L.circleMarker([lat,lon],{radius:6,color,weight:2,fillOpacity:.8});
+      m.bindPopup(`<strong>${kind==='lock'?'Lock':'Bridge'}</strong>${limitWidth?`<div>Width limit: ${limitWidth} m</div>`:''}`);
+      (kind==='lock'?locksLayer:bridgesLayer).addLayer(m);
+    }
+  }
+
+  // BIG, HIGH-CONTRAST PINS
+  function fuelIconHTML(name){
+    return `
+      <div class="pin" role="img" aria-label="Fuel station">
+        <svg width="42" height="56" viewBox="0 0 42 56" xmlns="http://www.w3.org/2000/svg">
+          <defs><linearGradient id="g1" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ffd166"/><stop offset="1" stop-color="#f59e0b"/></linearGradient></defs>
+          <path d="M21 0c10.5 0 19 8.5 19 19 0 12-14.5 28-19 37C16.5 47 2 31 2 19 2 8.5 10.5 0 21 0z" fill="url(#g1)" stroke="#b45309" stroke-width="2"/>
+          <text x="21" y="25" font-size="16" text-anchor="middle" font-weight="900" fill="#1f2937">⛽</text>
+        </svg>
+        <div class="lbl">${name||'Fuel'}</div>
+      </div>`;
+  }
+  function dockIconHTML(name){
+    return `
+      <div class="pin" role="img" aria-label="Dock / mooring">
+        <svg width="42" height="56" viewBox="0 0 42 56" xmlns="http://www.w3.org/2000/svg">
+          <defs><linearGradient id="g2" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs>
+          <path d="M21 0c10.5 0 19 8.5 19 19 0 12-14.5 28-19 37C16.5 47 2 31 2 19 2 8.5 10.5 0 21 0z" fill="url(#g2)" stroke="#3730a3" stroke-width="2"/>
+          <text x="21" y="25" font-size="16" text-anchor="middle" font-weight="900" fill="#fff">⚓</text>
+        </svg>
+        <div class="lbl">${name||'Dock'}</div>
+      </div>`;
+  }
+
+  function renderFuelDock(data){
+    fuelLayer.clearLayers(); dockingLayer.clearLayers();
+    for(const el of (data.elements||[])){
+      let lat,lon,tags=el.tags||{};
+      if(el.type==='node'){ lat=el.lat; lon=el.lon; }
+      else if(el.type==='way' && el.center){ lat=el.center.lat; lon=el.center.lon; } else continue;
+
+      const isFuel = tags.amenity==='fuel' || tags['seamark:type']==='fuel_supply';
+      const isDock = tags.leisure==='marina' || tags.mooring!=null || tags.amenity==='harbour' || (tags['seamark:type'] && /^(harbour|mooring|small_craft_facility)$/.test(tags['seamark:type']));
+
+      if(isFuel){
+        const icon = L.divIcon({ className:'', html:fuelIconHTML(tags.name), iconSize:[42,56], iconAnchor:[21,56] });
+        const m = L.marker([lat,lon], { icon, pane:'fuelPane', zIndexOffset: 1000 });
+        const name = tags.name ? `<div><strong>${tags.name}</strong></div>` : '';
+        const fuels = ['fuel:diesel','fuel:octane_95','fuel:e10','fuel:lpg','boat'].filter(k=>tags[k]).map(k=>`${k}: ${tags[k]}`).join(', ');
+        m.bindPopup(`<div><strong>Fuel station</strong>${name}<div>${fuels}</div></div>`);
+        fuelLayer.addLayer(m);
+      }
+      if(isDock){
+        const icon = L.divIcon({ className:'', html:dockIconHTML(tags.name), iconSize:[42,56], iconAnchor:[21,56] });
+        const m = L.marker([lat,lon], { icon, pane:'dockPane', zIndexOffset: 900 });
+        const name = tags.name ? `<div><strong>${tags.name}</strong></div>` : '';
+        const info = ['mooring','operator','fee','capacity','leisure','seamark:type'].filter(k=>tags[k]).map(k=>`${k}: ${tags[k]}`).join(', ');
+        m.bindPopup(`<div><strong>Dock/Mooring</strong>${name}<div>${info}</div></div>`);
+        dockingLayer.addLayer(m);
+      }
+    }
+  }
+
+  /* ---------- Fetch on move ---------- */
+  let fetchTimer=null;
+  map.on('moveend zoomend', ()=>{
+    if (!(toggleWaterways.checked || toggleLocks.checked || toggleBridges.checked || toggleFuel.checked || toggleDock.checked)) return;
+    if (map.getZoom() < 12) return;
+    const key = tileKeyFromBounds(map.getBounds());
+    if (state.fetchedTileKeys.has(key)) return;
+    state.fetchedTileKeys.add(key);
+    if (fetchTimer) clearTimeout(fetchTimer);
+    fetchTimer=setTimeout(async ()=>{
+      try{
+        setBusy(true); setStatus('Loading canals & POIs…');
+        const b = map.getBounds();
+        if (toggleWaterways.checked)  renderWaterways(await fetchOverpass(qWaterways(b),   `w:${key}`));
+        if (toggleLocks.checked || toggleBridges.checked) renderLocksBridges(await fetchOverpass(qLocksBridges(b), `lb:${key}`));
+        if (toggleFuel.checked || toggleDock.checked)     renderFuelDock(await fetchOverpass(qFuelDock(b),        `fd:${key}`));
+        setBusy(false); setStatus('Ready.');
+      }catch(e){ console.error(e); setBusy(false); setStatus('Overpass error. Zoom in or try again.'); }
+    }, 200);
+  });
+
+  function restylePOIs(){ state.fetchedTileKeys.clear(); locksLayer.clearLayers(); bridgesLayer.clearLayers(); fuelLayer.clearLayers(); dockingLayer.clearLayers(); map.fire('moveend'); }
+
+  /* ---------- Graph + routing ---------- */
+  function nearestPointOnSegment(p,a,b){
+    const toXY=([lat,lon])=>[lon,lat]; const A=toXY(a), B=toXY(b), P=toXY(p);
+    const AB=[B[0]-A[0],B[1]-A[1]], AP=[P[0]-A[0],P[1]-A[1]]; const ab2=AB[0]*AB[0]+AB[1]*AB[1];
+    const t=ab2 ? Math.max(0,Math.min(1,(AP[0]*AB[0]+AP[1]*AB[1])/ab2)) : 0; const Q=[A[0]+t*AB[0],A[1]+t*AB[1]];
+    return [Q[1],Q[0],t];
+  }
+  function graphAddNode(lat,lon){ const key=`${lat.toFixed(6)},${lon.toFixed(6)}`; if(state.graph.nodes.has(key)) return state.graph.nodes.get(key); const id=state.graph.nextId++; state.graph.nodes.set(key,id); state.graph.coords.set(id,[lat,lon]); state.graph.adj.set(id,[]); return id; }
+  function graphAddEdge(idA,idB){ const a=state.graph.coords.get(idA), b=state.graph.coords.get(idB); const d=haversine(a,b); state.graph.adj.get(idA).push([idB,d]); state.graph.adj.get(idB).push([idA,d]); state.graph.segments.push({a,b,idA,idB}); }
+  function buildGraphFromFeatures(features){
+    const BATCH=200; let i=0;
+    (function step(){ const end=Math.min(features.length,i+BATCH); for(;i<end;i++){ const f=features[i]; if(!f.geometry||f.geometry.type!=='LineString') continue; const coords=f.geometry.coordinates; let prev=null; for(let j=0;j<coords.length;j++){ const lat=coords[j][1], lon=coords[j][0]; const id=graphAddNode(lat,lon); if(prev!==null) graphAddEdge(prev,id); prev=id; } } if(i<features.length) setTimeout(step,0); })();
+  }
+  function findNearestGraphNode(latlng,snap=true){
+    let target=[latlng.lat,latlng.lng]; let nearest={dist:Infinity,id:null,proj:target,idA:null,idB:null};
+    if(snap && state.graph.segments.length){
+      for(const seg of state.graph.segments){ const proj=nearestPointOnSegment(target,seg.a,seg.b); const d=haversine(target,[proj[0],proj[1]]); if(d<nearest.dist) nearest={dist:d,idA:seg.idA,idB:seg.idB,t:proj[2],proj:[proj[0],proj[1]]}; }
+      const tempId=graphAddNode(nearest.proj[0],nearest.proj[1]); state.graph.adj.get(tempId).length=0;
+      const dA=haversine(nearest.proj,state.graph.coords.get(nearest.idA)); const dB=haversine(nearest.proj,state.graph.coords.get(nearest.idB));
+      state.graph.adj.get(tempId).push([nearest.idA,dA]); state.graph.adj.get(nearest.idA).push([tempId,dA]);
+      state.graph.adj.get(tempId).push([nearest.idB,dB]); state.graph.adj.get(nearest.idB).push([tempId,dB]);
+      return { id: tempId, snapped:true, at: nearest.proj };
+    }else{
+      for(const [id,coord] of state.graph.coords){ const d=haversine(target,coord); if(d<nearest.dist) nearest={dist:d,id,proj:coord}; }
+      return { id: nearest.id, snapped:false, at: nearest.proj };
+    }
+  }
+
+  // Simple main-thread Dijkstra (fast enough after thinning)
+  function dijkstra(startId,endId){
+    const dist=new Map(), prev=new Map(), visited=new Set(); const pq=[]; const push=(id,d)=>{ pq.push([d,id]); pq.sort((a,b)=>a[0]-b[0]); };
+    for(const id of state.graph.coords.keys()) dist.set(id,Infinity);
+    dist.set(startId,0); push(startId,0);
+    while(pq.length){
+      const [d,id]=pq.shift(); if(visited.has(id)) continue; visited.add(id);
+      if(id===endId) break;
+      for(const [to,w] of state.graph.adj.get(id)||[]){
+        const nd=d+w; if(nd<(dist.get(to)||Infinity)){ dist.set(to,nd); prev.set(to,id); push(to,nd); }
+      }
+    }
+    if(!prev.has(endId)) return null;
+    const path=[]; for(let u=endId; u!==undefined; u=prev.get(u)){ path.push(u); if(u===startId) break; } path.reverse();
+    return { path, meters: dist.get(endId) };
+  }
+
+  function computeAndDrawRoute(startLL,endLL){
+    if(state.graph.segments.length===0){ setStatus('No canal graph yet — zoom in to load waterways.'); return; }
+    const s=findNearestGraphNode(startLL, snapToWaterways.checked);
+    const e=findNearestGraphNode(endLL,   snapToWaterways.checked);
+    const res=dijkstra(s.id,e.id);
+    routeLayer.clearLayers();
+    if(!res){ setStatus('No path found along waterways.'); state.route=null; simulateBtn.disabled=true; updateRouteStats(); return; }
+    const latlngs = res.path.map(id=> state.graph.coords.get(id));
+    drawRoute(latlngs);
+    state.route = latlngs;
+    simulateBtn.disabled=false;
+    updateRouteStats(res.meters/1000);
+    setStatus('Route computed.');
+  }
+
+  function drawRoute(latlngs){
+    const line=L.polyline(latlngs,{color:'#111827',weight:4,opacity:.95}).addTo(routeLayer);
+    L.polyline(latlngs,{color:'#fff',weight:2,opacity:.9,dashArray:'4 8'}).addTo(routeLayer);
+    map.fitBounds(line.getBounds(),{padding:[40,40]});
+  }
+
+  function updateRouteStats(optionalKm=null){
+    if(!state.route){ routeStats.textContent='Route: —'; return; }
+    let km=(optionalKm!=null)?optionalKm:0; if(optionalKm==null) for(let i=1;i<state.route.length;i++) km+=haversine(state.route[i-1],state.route[i])/1000;
+    const speed=Math.max(1,state.boat.speedKmh); const mins=Math.round((km/speed)*60);
+    routeStats.textContent=`Route: ${km.toFixed(2)} km • ETA @ ${speed} km/h ≈ ${mins} min`;
+  }
+
+  /* ---------- Selection ---------- */
+  function startSelect(){ state.selection={active:true,start:null,finish:null,startM:null,finishM:null}; cancelSelBtn.disabled=false; selectionLayer.clearLayers(); setStatus('Selection: click Start point on the map.'); }
+  function cancelSelect(){ state.selection.active=false; cancelSelBtn.disabled=true; selectionLayer.clearLayers(); setStatus('Selection cancelled.'); }
+  function onMapClick(e){
+    if(!state.selection.active) return;
+    if(!state.selection.start){
+      state.selection.start=e.latlng;
+      state.selection.startM=L.marker(e.latlng,{icon:L.divIcon({className:'',html:'<div style="padding:4px 8px;background:#10b981;color:#fff;border-radius:4px;font-weight:700;">Start</div>'})}).addTo(selectionLayer);
+      setStatus('Selection: now click Destination.');
+    } else if(!state.selection.finish){
+      state.selection.finish=e.latlng;
+      state.selection.finishM=L.marker(e.latlng,{icon:L.divIcon({className:'',html:'<div style="padding:4px 8px;background:#ef4444;color:#fff;border-radius:4px;font-weight:700;">Finish</div>'})}).addTo(selectionLayer);
+      setStatus('Computing route…');
+      computeAndDrawRoute(state.selection.start, state.selection.finish);
+      state.selection.active=false; cancelSelBtn.disabled=true;
+    }
+  }
+
+  /* ---------- Simulation ---------- */
+  function toggleSimulation(){
+    if(!state.route) return;
+    if(state.sim.anim){ cancelAnimationFrame(state.sim.anim); state.sim.anim=null; simulateBtn.textContent='▶︎ Simulate'; return; }
+    simulateBtn.textContent='⏸ Pause';
+    const total= state.route.reduce((acc,_,i)=> i? acc + haversine(state.route[i-1], state.route[i]) : 0, 0);
+    const speed = Math.max(1, state.boat.speedKmh)*1000/3600; const start=performance.now();
+    const icon=L.divIcon({className:'',html:'<div id="simBoat" style="width:18px;height:18px;border-radius:50%;background:#0ea5e9;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3);"></div>',iconSize:[18,18]});
+    if(!state.sim.marker) state.sim.marker=L.marker(state.route[0],{icon,zIndexOffset:1500}).addTo(routeLayer);
+    const cum=[0]; for(let i=1;i<state.route.length;i++) cum[i]=cum[i-1]+haversine(state.route[i-1], state.route[i]);
+    const along=(dist)=>{ if(dist<=0) return state.route[0]; if(dist>=total) return state.route.at(-1); let i=1; while(dist>cum[i]) i++; const A=state.route[i-1],B=state.route[i]; const seg=cum[i]-cum[i-1]; const t=(dist-cum[i-1])/seg; return [A[0]+(B[0]-A[0])*t, A[1]+(B[1]-A[1])*t]; };
+    const step=(now)=>{ const d=Math.min(total,(now-start)*speed); const pt=along(d); state.sim.marker.setLatLng(pt);
+      const q=along(Math.min(total,d+Math.max(5,total*.01))); const ang=Math.atan2(q[0]-pt[0], q[1]-pt[1])*180/Math.PI; const el=document.getElementById('simBoat'); if(el) el.style.transform=`rotate(${90-ang}deg)`;
+      if(d<total && state.sim.anim!==null) state.sim.anim=requestAnimationFrame(step); else { simulateBtn.textContent='▶︎ Simulate'; state.sim.anim=null; } };
+    state.sim.anim=requestAnimationFrame(step);
+  }
+
+  /* ---------- Save / Load ---------- */
+  function saveRouteToSlot(slot){ if(!state.route||state.route.length<2) { setStatus('No route to save.'); return; } const name=slot.nameInput.value.trim()||'Saved route'; localStorage.setItem(slot.key, JSON.stringify({name,coords:state.route})); slot.nameInput.value=name; setStatus(`Saved to ${name}.`); }
+  function loadRouteFromSlot(slot){ const raw=localStorage.getItem(slot.key); if(!raw){ setStatus('Nothing saved in that slot.'); return; } try{ const {name,coords}=JSON.parse(raw); if(!coords?.length) throw 0; clearRoute(); drawRoute(coords); state.route=coords; simulateBtn.disabled=false; updateRouteStats(); setStatus(`Loaded route: ${name||'(unnamed)'}`); }catch{ setStatus('Failed to load saved route.'); } }
+  function deleteRouteSlot(slot){ localStorage.removeItem(slot.key); setStatus('Deleted saved route in this slot.'); }
+  slots.forEach(s=>{ s.save.addEventListener('click', ()=>saveRouteToSlot(s)); s.load.addEventListener('click', ()=>loadRouteFromSlot(s)); s.del.addEventListener('click', ()=>deleteRouteSlot(s)); });
+
+  /* ---------- Init ---------- */
+  map.setView([51.99, 4.26], 12); setStatus('Ready. Zoom in to load canals.'); map.fire('moveend');
+}
+</script>
+</body>
+</html>
